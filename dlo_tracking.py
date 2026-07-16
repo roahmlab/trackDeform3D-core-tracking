@@ -22,49 +22,21 @@ import numpy as np
 import cv2
 from pathlib import Path
 from tqdm import tqdm
-from scipy.spatial.transform import Rotation as R
-from scipy.ndimage import gaussian_filter1d
-from sklearn.neighbors import NearestNeighbors
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from wire_tracker import WireTracker
+from tracker.wire_tracker import WireTracker
+from utils.smoothing import smooth_trajectories
+from utils.transforms import load_transforms, pose7_to_matrix, get_ee_positions_cam
+from utils.metrics_wire import (compute_edge_metrics, compute_position_metrics,
+                                sample_points_on_edges, compute_chamfer_metrics)
+from utils.summary import write_summary_tables, print_summary_tables
 
 
 # ============================================================================
 # POST-PROCESS: TRAJECTORY SMOOTHING
 # ============================================================================
-
-def smooth_trajectories(keypoints_3d_seq: np.ndarray, sigma: float = 2.0) -> np.ndarray:
-    """Apply Gaussian smoothing to keypoint trajectories along the time axis.
-
-    NaN frames are filled by linear interpolation before smoothing, then
-    smoothing uses 'nearest' boundary handling. Mirrors the post-processing
-    in deformable_seg/smooth_bdlo_keypoints.py.
-
-    Args:
-        keypoints_3d_seq: T x K x 3 array of keypoints over time (NaN allowed)
-        sigma: Gaussian filter sigma (default: 2.0)
-
-    Returns:
-        T x K x 3 smoothed keypoints
-    """
-    if keypoints_3d_seq is None or len(keypoints_3d_seq) < 2:
-        return keypoints_3d_seq.copy() if keypoints_3d_seq is not None else keypoints_3d_seq
-    T, K, D = keypoints_3d_seq.shape
-    smoothed = np.zeros_like(keypoints_3d_seq, dtype=np.float64)
-    indices = np.arange(T)
-    for k in range(K):
-        for d in range(D):
-            traj = keypoints_3d_seq[:, k, d]
-            valid = ~np.isnan(traj)
-            if np.sum(valid) > 2:
-                traj_interp = np.interp(indices, indices[valid], traj[valid])
-                smoothed[:, k, d] = gaussian_filter1d(traj_interp, sigma=sigma, mode='nearest')
-            else:
-                smoothed[:, k, d] = traj
-    return smoothed
 
 
 # ============================================================================
@@ -100,247 +72,9 @@ def load_chunk_data(chunk_dir: Path) -> dict:
     }
 
 
-def load_transforms(calib_dir: Path) -> dict:
-    """Load camera-robot transforms."""
-    tf = np.load(calib_dir / 'transform_ee_cam_world.npz')
-    return {
-        'T_left_base2cam': tf['T_left_base2cam'],
-        'T_right_base2cam': tf['T_right_base2cam'],
-        'K': tf['K'],
-    }
-
-
-def pose7_to_matrix(pose: np.ndarray) -> np.ndarray:
-    """Convert [x,y,z,qw,qx,qy,qz] to 4x4 matrix."""
-    T = np.eye(4)
-    T[:3, 3] = pose[:3]
-    quat = pose[3:]
-    T[:3, :3] = R.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_matrix()
-    return T
-
-
-def get_ee_positions_cam(left_pose, right_pose, T_left_base2cam, T_right_base2cam):
-    """Convert EE poses to camera frame (mm)."""
-    T_left_ee = pose7_to_matrix(left_pose)
-    left_pos_cam = (T_left_base2cam @ T_left_ee)[:3, 3]
-    T_right_ee = pose7_to_matrix(right_pose)
-    right_pos_cam = (T_right_base2cam @ T_right_ee)[:3, 3]
-    return np.array([left_pos_cam * 1000, right_pos_cam * 1000])
-
-
 # ============================================================================
 # METRICS
 # ============================================================================
-
-def compute_edge_metrics(keypoints, edges, reference_lengths):
-    """Compute edge length metrics."""
-    if keypoints is None or len(keypoints) == 0 or edges is None or len(edges) == 0:
-        return {
-            'pct_errors': np.array([]), 'abs_errors': np.array([]),
-            'pct_mean': 0.0, 'pct_std': 0.0, 'pct_max': 0.0, 'rmse_mm': 0.0,
-            'under_2pct': 0.0, 'under_5pct': 0.0, 'under_10pct': 0.0,
-        }
-
-    pct_errors = []
-    abs_errors = []
-    for edge_idx, (i, j) in enumerate(edges):
-        if i >= len(keypoints) or j >= len(keypoints):
-            continue
-        ref_length = reference_lengths[edge_idx]
-        if ref_length > 1e-6:
-            current_length = np.linalg.norm(keypoints[i] - keypoints[j])
-            abs_err = abs(current_length - ref_length)
-            pct_err = abs_err / ref_length
-            pct_errors.append(pct_err)
-            abs_errors.append(abs_err)
-
-    pct_errors = np.array(pct_errors)
-    abs_errors = np.array(abs_errors)
-
-    if len(pct_errors) == 0:
-        return {
-            'pct_errors': np.array([]), 'abs_errors': np.array([]),
-            'pct_mean': 0.0, 'pct_std': 0.0, 'pct_max': 0.0, 'rmse_mm': 0.0,
-            'under_2pct': 0.0, 'under_5pct': 0.0, 'under_10pct': 0.0,
-        }
-
-    return {
-        'pct_errors': pct_errors,
-        'abs_errors': abs_errors,
-        'pct_mean': np.mean(pct_errors) * 100,
-        'pct_std': np.std(pct_errors) * 100,
-        'pct_max': np.max(pct_errors) * 100,
-        'rmse_mm': np.sqrt(np.mean(abs_errors ** 2)),
-        'under_2pct': np.mean(pct_errors < 0.02) * 100,
-        'under_5pct': np.mean(pct_errors < 0.05) * 100,
-        'under_10pct': np.mean(pct_errors < 0.10) * 100,
-    }
-
-
-def compute_position_metrics(keypoints, skeleton_pc, extra_gt_points=None):
-    """Compute position metrics."""
-    if keypoints is None or len(keypoints) == 0 or skeleton_pc is None or len(skeleton_pc) == 0:
-        return {
-            'distances': np.array([]),
-            'rmse_mm': 0.0,
-            'under_2mm': 0.0, 'under_5mm': 0.0, 'under_10mm': 0.0,
-        }
-
-    gt_cloud = skeleton_pc
-    if extra_gt_points is not None and len(extra_gt_points) > 0:
-        gt_cloud = np.vstack([skeleton_pc, extra_gt_points])
-
-    nn = NearestNeighbors(n_neighbors=1).fit(gt_cloud)
-    distances, _ = nn.kneighbors(keypoints)
-    distances = distances.flatten()
-
-    return {
-        'distances': distances,
-        'rmse_mm': np.sqrt(np.mean(distances ** 2)),
-        'under_2mm': np.mean(distances < 2.0) * 100,
-        'under_5mm': np.mean(distances < 5.0) * 100,
-        'under_10mm': np.mean(distances < 10.0) * 100,
-    }
-
-
-def extract_clean_path_pc(clean_path_mask, depth, intrinsics, ee_positions=None, dilate_pixels=1):
-    """Extract 3D point cloud from clean path mask with dilation."""
-    if clean_path_mask is None or depth is None:
-        if ee_positions is not None and len(ee_positions) > 0:
-            return np.array(ee_positions, dtype=np.float32)
-        return np.empty((0, 3), dtype=np.float32)
-
-    if dilate_pixels > 0:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*dilate_pixels+1, 2*dilate_pixels+1))
-        dilated_mask = cv2.dilate(clean_path_mask.astype(np.uint8), kernel, iterations=1)
-    else:
-        dilated_mask = clean_path_mask
-
-    rows, cols = np.where(dilated_mask > 0)
-    if len(rows) == 0:
-        if ee_positions is not None and len(ee_positions) > 0:
-            return np.array(ee_positions, dtype=np.float32)
-        return np.empty((0, 3), dtype=np.float32)
-
-    z_vals = depth[rows, cols].astype(np.float32)
-    valid = z_vals > 0
-    rows, cols, z_vals = rows[valid], cols[valid], z_vals[valid]
-
-    if len(z_vals) == 0:
-        if ee_positions is not None and len(ee_positions) > 0:
-            return np.array(ee_positions, dtype=np.float32)
-        return np.empty((0, 3), dtype=np.float32)
-
-    fx, fy = intrinsics[0, 0], intrinsics[1, 1]
-    cx, cy = intrinsics[0, 2], intrinsics[1, 2]
-
-    x_vals = (cols - cx) * z_vals / fx
-    y_vals = (rows - cy) * z_vals / fy
-
-    pc = np.column_stack([x_vals, y_vals, z_vals]).astype(np.float32)
-
-    if ee_positions is not None and len(ee_positions) > 0:
-        ee_arr = np.array(ee_positions, dtype=np.float32).reshape(-1, 3)
-        pc = np.vstack([pc, ee_arr])
-
-    return pc
-
-
-def sample_points_on_edges(keypoints, edges, n_target_points):
-    """Uniformly sample points along predicted edges."""
-    if keypoints is None or len(keypoints) == 0 or edges is None or len(edges) == 0:
-        return np.empty((0, 3), dtype=np.float32)
-
-    if n_target_points <= 0:
-        return np.empty((0, 3), dtype=np.float32)
-
-    edge_lengths = []
-    for (i, j) in edges:
-        if i < len(keypoints) and j < len(keypoints):
-            length = np.linalg.norm(keypoints[i] - keypoints[j])
-            edge_lengths.append(length)
-        else:
-            edge_lengths.append(0.0)
-
-    total_length = sum(edge_lengths)
-    if total_length < 1e-6:
-        return np.empty((0, 3), dtype=np.float32)
-
-    sampled_points = []
-    for edge_idx, (i, j) in enumerate(edges):
-        if i >= len(keypoints) or j >= len(keypoints):
-            continue
-
-        n_edge = max(2, int(round(n_target_points * edge_lengths[edge_idx] / total_length)))
-
-        t_vals = np.linspace(0, 1, n_edge)
-        p_start = keypoints[i]
-        p_end = keypoints[j]
-
-        for t in t_vals:
-            sampled_points.append(p_start + t * (p_end - p_start))
-
-    if len(sampled_points) == 0:
-        return np.empty((0, 3), dtype=np.float32)
-
-    return np.array(sampled_points, dtype=np.float32)
-
-
-def compute_chamfer_metrics(pred_cloud, ref_cloud):
-    """Compute Chamfer Distance metrics."""
-    empty_result = {
-        'pred2ref_avg': 0.0, 'ref2pred_avg': 0.0, 'cd': 0.0,
-        'precision_2mm': 0.0, 'precision_5mm': 0.0, 'precision_10mm': 0.0,
-        'recall_2mm': 0.0, 'recall_5mm': 0.0, 'recall_10mm': 0.0,
-        'f_2mm': 0.0, 'f_5mm': 0.0, 'f_10mm': 0.0,
-    }
-
-    if pred_cloud is None or len(pred_cloud) == 0 or ref_cloud is None or len(ref_cloud) == 0:
-        return empty_result
-
-    nn_ref = NearestNeighbors(n_neighbors=1).fit(ref_cloud)
-    pred2ref_dists, _ = nn_ref.kneighbors(pred_cloud)
-    pred2ref_dists = pred2ref_dists.flatten()
-
-    nn_pred = NearestNeighbors(n_neighbors=1).fit(pred_cloud)
-    ref2pred_dists, _ = nn_pred.kneighbors(ref_cloud)
-    ref2pred_dists = ref2pred_dists.flatten()
-
-    pred2ref_avg = np.mean(pred2ref_dists)
-    ref2pred_avg = np.mean(ref2pred_dists)
-    cd = (pred2ref_avg + ref2pred_avg) / 2
-
-    precision_2mm = np.mean(pred2ref_dists < 2.0) * 100
-    precision_5mm = np.mean(pred2ref_dists < 5.0) * 100
-    precision_10mm = np.mean(pred2ref_dists < 10.0) * 100
-
-    recall_2mm = np.mean(ref2pred_dists < 2.0) * 100
-    recall_5mm = np.mean(ref2pred_dists < 5.0) * 100
-    recall_10mm = np.mean(ref2pred_dists < 10.0) * 100
-
-    def f_score(p, r):
-        if p + r < 1e-6:
-            return 0.0
-        return 2 * p * r / (p + r)
-
-    f_2mm = f_score(precision_2mm, recall_2mm)
-    f_5mm = f_score(precision_5mm, recall_5mm)
-    f_10mm = f_score(precision_10mm, recall_10mm)
-
-    return {
-        'pred2ref_avg': pred2ref_avg,
-        'ref2pred_avg': ref2pred_avg,
-        'cd': cd,
-        'precision_2mm': precision_2mm,
-        'precision_5mm': precision_5mm,
-        'precision_10mm': precision_10mm,
-        'recall_2mm': recall_2mm,
-        'recall_5mm': recall_5mm,
-        'recall_10mm': recall_10mm,
-        'f_2mm': f_2mm,
-        'f_5mm': f_5mm,
-        'f_10mm': f_10mm,
-    }
 
 
 # ============================================================================
@@ -473,11 +207,8 @@ def process_clip(data, transforms, ee_poses_3d, clip_idx, start_frame, end_frame
         'n_keypoints': n_keypoints,
         'target_branch_nodes': 0,
         'target_leaf_nodes': 2,
-        'bg_threshold': 80.0,
         'max_depth': 2000.0,
         'top_k_components': 1,
-        'arm_dilation_pixels': 5,
-        'enable_cpd': False,
         'n_outer_iterations': 20,
         'n_edge_iterations': 15,
         'edge_weight': 0.5,
@@ -1110,49 +841,6 @@ def main():
             'f_10mm': np.mean([s['f_10mm'] for s in clip_summaries]),
         })
 
-    # Helper function to write summary tables
-    def write_summary_tables(f, summary_rows, title_prefix=""):
-        # Table 1: Edge Length Metrics
-        f.write(f"{title_prefix}Edge Length Metrics\n")
-        f.write("-" * 100 + "\n")
-        f.write(f"{'Method':<12} | {'Edge % Mean':<18} | {'Edge RMSE (mm)':<15} | {'<2%':<8} | {'<5%':<8} | {'<10%':<8}\n")
-        f.write("-" * 100 + "\n")
-        for s in summary_rows:
-            f.write(f"{s['method']:<12} | {s['edge_pct_mean_avg']:>5.2f}% ±{s['edge_pct_mean_std']:>5.2f}% | "
-                    f"{s['edge_rmse_avg']:>5.2f} ±{s['edge_rmse_std']:>4.2f} mm | "
-                    f"{s['edge_under_2pct']:>5.1f}% | {s['edge_under_5pct']:>5.1f}% | {s['edge_under_10pct']:>5.1f}%\n")
-
-        f.write("\n")
-
-        # Table 2: Position RMSE Metrics
-        f.write(f"{title_prefix}Position RMSE Metrics\n")
-        f.write("-" * 80 + "\n")
-        f.write(f"{'Method':<12} | {'Pos RMSE (mm)':<18} | {'<2mm':<8} | {'<5mm':<8} | {'<10mm':<8}\n")
-        f.write("-" * 80 + "\n")
-        for s in summary_rows:
-            f.write(f"{s['method']:<12} | {s['pos_rmse_avg']:>5.2f} ±{s['pos_rmse_std']:>5.2f} mm   | "
-                    f"{s['pos_under_2mm']:>5.1f}% | {s['pos_under_5mm']:>5.1f}% | {s['pos_under_10mm']:>5.1f}%\n")
-
-        f.write("\n")
-
-        # Table 3: Chamfer Distance Metrics
-        f.write(f"{title_prefix}Chamfer Distance Metrics \n")
-        f.write("-" * 130 + "\n")
-        f.write(f"{'Method':<12} | {'CD (mm)':<15} | {'Pred→Ref':<10} | {'Ref→Pred':<10} | {'Prec@2mm':<8} | {'Prec@5mm':<8} | {'Prec@10mm':<8} | {'Rec@2mm':<8} | {'Rec@5mm':<8} | {'Rec@10mm':<8}\n")
-        f.write("-" * 130 + "\n")
-        for s in summary_rows:
-            f.write(f"{s['method']:<12} | {s['cd_avg']:>5.2f} ±{s['cd_std']:>4.2f} mm | "
-                    f"{s['cd_pred2ref_avg']:>7.2f} mm | {s['cd_ref2pred_avg']:>7.2f} mm | "
-                    f"{s['precision_2mm']:>5.1f}% | {s['precision_5mm']:>5.1f}% | {s['precision_10mm']:>5.1f}% | "
-                    f"{s['recall_2mm']:>5.1f}% | {s['recall_5mm']:>5.1f}% | {s['recall_10mm']:>5.1f}%\n")
-
-        f.write("\n")
-        f.write(f"{title_prefix}F-Scores\n")
-        f.write("-" * 60 + "\n")
-        f.write(f"{'Method':<12} | {'F@2mm':<12} | {'F@5mm':<12} | {'F@10mm':<12}\n")
-        f.write("-" * 60 + "\n")
-        for s in summary_rows:
-            f.write(f"{s['method']:<12} | {s['f_2mm']:>8.2f}% | {s['f_5mm']:>8.2f}% | {s['f_10mm']:>8.2f}%\n")
 
     # Save chunk aggregate summary with both aggregation methods
     chunk_summary_txt = chunk_summary_dir / 'chunk_aggregate_summary.txt'
@@ -1207,41 +895,6 @@ def main():
         reference_lengths_per_clip=np.array(combined_reference_lengths) if combined_reference_lengths else np.array([]),
     )
 
-    # Helper function to print summary tables
-    def print_summary_tables(summary_rows):
-        print("\nEdge Length Metrics")
-        print("-" * 100)
-        print(f"{'Method':<12} | {'Edge % Mean':<18} | {'Edge RMSE (mm)':<15} | {'<2%':<8} | {'<5%':<8} | {'<10%':<8}")
-        print("-" * 100)
-        for s in summary_rows:
-            print(f"{s['method']:<12} | {s['edge_pct_mean_avg']:>5.2f}% ±{s['edge_pct_mean_std']:>5.2f}% | "
-                  f"{s['edge_rmse_avg']:>5.2f} ±{s['edge_rmse_std']:>4.2f} mm | "
-                  f"{s['edge_under_2pct']:>5.1f}% | {s['edge_under_5pct']:>5.1f}% | {s['edge_under_10pct']:>5.1f}%")
-
-        print("\nPosition RMSE Metrics")
-        print("-" * 80)
-        print(f"{'Method':<12} | {'Pos RMSE (mm)':<18} | {'<2mm':<8} | {'<5mm':<8} | {'<10mm':<8}")
-        print("-" * 80)
-        for s in summary_rows:
-            print(f"{s['method']:<12} | {s['pos_rmse_avg']:>5.2f} ±{s['pos_rmse_std']:>5.2f} mm   | "
-                  f"{s['pos_under_2mm']:>5.1f}% | {s['pos_under_5mm']:>5.1f}% | {s['pos_under_10mm']:>5.1f}%")
-
-        print("\nChamfer Distance Metrics ")
-        print("-" * 130)
-        print(f"{'Method':<12} | {'CD (mm)':<15} | {'Pred→Ref':<10} | {'Ref→Pred':<10} | {'Prec@2mm':<8} | {'Prec@5mm':<8} | {'Prec@10mm':<8} | {'Rec@2mm':<8} | {'Rec@5mm':<8} | {'Rec@10mm':<8}")
-        print("-" * 130)
-        for s in summary_rows:
-            print(f"{s['method']:<12} | {s['cd_avg']:>5.2f} ±{s['cd_std']:>4.2f} mm | "
-                  f"{s['cd_pred2ref_avg']:>7.2f} mm | {s['cd_ref2pred_avg']:>7.2f} mm | "
-                  f"{s['precision_2mm']:>5.1f}% | {s['precision_5mm']:>5.1f}% | {s['precision_10mm']:>5.1f}% | "
-                  f"{s['recall_2mm']:>5.1f}% | {s['recall_5mm']:>5.1f}% | {s['recall_10mm']:>5.1f}%")
-
-        print("\nF-Scores")
-        print("-" * 60)
-        print(f"{'Method':<12} | {'F@2mm':<12} | {'F@5mm':<12} | {'F@10mm':<12}")
-        print("-" * 60)
-        for s in summary_rows:
-            print(f"{s['method']:<12} | {s['f_2mm']:>8.2f}% | {s['f_5mm']:>8.2f}% | {s['f_10mm']:>8.2f}%")
 
     # Print final summary
     print("\n" + "=" * 100)

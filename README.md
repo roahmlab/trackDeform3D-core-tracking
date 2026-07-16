@@ -40,9 +40,73 @@ disagree with where the gripper actually is in the depth/RGB frame at the same
 timestamp. Trusting EE FK as a hard target would drag keypoints away from the
 true observation. The latency itself has since been fixed at the capture stack,
 but that fix has **not yet been integrated with this tracking pipeline**; once
-it is, EE FK can be re-enabled as an optimization anchor (e.g. by uncommenting
-`_replace_with_ee_poses` in `wire_tracker.py` and adding the equivalent step
-in cloth/fabric). See the per-tracker docstrings for details.
+it is, EE FK can be re-enabled as an optimization anchor by re-introducing a
+hard-replace step after node matching (the `_replace_with_ee_poses` pattern —
+removed as dead code in the 2026-07 cleanup, see git history) and adding the
+equivalent step in cloth/fabric. See the per-tracker docstrings for details.
+
+---
+
+## Repository layout
+
+```
+dlo_tracking.py bdlo_tracking.py     entry points (CLI + data loading + per-clip
+cloth_tracking.py fabric_tracking.py orchestration + saving + video rendering)
+initialization/
+    wire_init.py        WireInitMixin      - frame-0 init for DLO/BDLO (dispatch,
+                                             single-DLO chain, segment-aware BDLO)
+    wire_initializer.py WireInitializer    - BDLO segment-aware topology builder
+    cloth_init.py       ClothInitMixin     - contour corners -> rect grid init
+    cloth_contour.py    rectangle-fitting helpers used by the cloth init
+    fabric_init.py      FabricInitMixin    - mask corners -> grid + FPS init
+tracker/
+    wire_tracker.py     WireTracker(WireInitMixin)     - DLO/BDLO tracking
+    cloth_tracker.py    ClothTracker(ClothInitMixin)   + ClothTrackerFull (track())
+    fabric_tracker.py   FabricTracker(FabricInitMixin) + FabricTrackerFull (track())
+utils/
+    transforms.py       EE pose -> camera frame (shared by all four)
+    smoothing.py        smooth_trajectories (shared by all four)
+    metrics_wire.py     metrics for DLO/BDLO
+    metrics_cloth.py    metrics for cloth (NaN-hardened: T-crop yields NaN nodes)
+    metrics_fabric.py   metrics for fabric
+    pointcloud.py       extract_surface_point_cloud (cloth/fabric)
+    summary.py          chunk-summary tables (DLO/BDLO)
+```
+
+Init methods live in `initialization/` as mixins that the tracker classes
+inherit — method bodies are verbatim from the original flat scripts, so `self`
+is the tracker instance, and helpers used by *both* init and tracking
+(`_node_identification`, `_detect_contour_corners`, ...) stay in the tracker.
+
+Drivers stay at the repo root on purpose: `input_data/`/`output/` are anchored
+to the script location, `run_all.sh` is unchanged, and
+`deform_with_hands/deform_with_hands_tracking.py` monkeypatches
+`bdlo_tracking.WireTracker` — `process_clip` must remain **defined in**
+`bdlo_tracking.py` for that patch to take effect.
+
+The 2026-07 cleanup also removed dead code: the unused CPD registration path
+(`_cpd_register`, `enable_cpd`, `cpd_*` params in every tracker), the
+background-subtraction segmentation branch (all shipped runs pass precomputed
+masks), the global-FPS BDLO init branch, `fabric_batch_experiment.py`
+(unrunnable legacy), and the legacy demo half of `cloth_rect_contour_init.py`
+(now `initialization/cloth_contour.py`). Everything removed is recoverable from
+git history or the `trackDeform3D-core-tracking_backup` snapshot.
+
+## Determinism & reproduction
+
+Measured on the shipped chunks (two independent runs of the pre-cleanup code):
+DLO and BDLO outputs are fully deterministic (bit-identical npz/csv/txt),
+cloth and fabric **keypoint npz are deterministic**, but cloth/fabric
+**evaluation metrics are not** — `extract_surface_point_cloud` random-downsamples
+the reference cloud and `sample_points_on_faces` samples random points per face,
+both unseeded, so `per_frame.csv` / `summary.txt` numbers vary slightly between
+runs (the keypoints they evaluate do not). The plotly `*_init*.html` files embed
+random downsampling and unique div ids, so they are never byte-comparable.
+
+"Reproduces the golden outputs" therefore means: npz array-equal + csv/txt
+byte-equal for DLO/BDLO, npz array-equal for cloth/fabric, and metric CSVs
+equal only under an identical temporary `np.random.seed` in both code versions
+(the acceptance test used for the cleanup).
 
 ---
 
