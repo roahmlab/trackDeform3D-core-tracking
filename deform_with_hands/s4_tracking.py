@@ -280,9 +280,12 @@ class DeformWithHandsTracker(WireTracker):
 bdlo_tracking.WireTracker = DeformWithHandsTracker  # process_clip instantiates this
 
 DIR = Path(__file__).resolve().parent
-UNDIST_NPZ = '/home/yehengz/hamer/deform_with_hands/data/rgbd_undist.npz'
-HANDS_NPZ = '/home/yehengz/hamer/deform_with_hands/output/hands.npz'
-ROPE_NPZ = DIR / 'output' / 'rope_masks' / 'masks.npz'
+from paths import UNDIST_NPZ as _U
+UNDIST_NPZ = str(_U)
+from paths import HANDS_NPZ as _H
+HANDS_NPZ = str(_H)
+from paths import ROPE_MASKS_NPZ as _RM
+ROPE_NPZ = str(_RM)
 
 
 def main():
@@ -316,7 +319,7 @@ def main():
     data = {
         'color': d['color'],          # BGR, as bdlo_tracking expects
         'depth': d['depth'],          # uint16 mm; process_clip casts to float32
-        'dlo_masks': masks,           # rope-only {0,1}, used AS-IS
+        'masks': masks,               # rope-only {0,1}, used AS-IS
         'n_frames': len(masks),
     }
     transforms = {'K': d['K']}
@@ -355,26 +358,16 @@ def main():
             sigma=args.sigma,
         ))
 
-    # Stacked per-frame CSV across clips (chunk-summary style)
-    summary_dir = output_dir / 'summary'
-    summary_dir.mkdir(parents=True, exist_ok=True)
-    stacked_csv = summary_dir / 'all_clips_metrics.csv'
-    with open(stacked_csv, 'w') as f:
-        f.write('Clip,Frame,GlobalFrame,Method,EdgePctMean,EdgePctStd,EdgePctMax,EdgeRMSE,PosRMSE,'
-                'CD,Pred2Ref,Ref2Pred,Prec@2mm,Prec@5mm,Prec@10mm,Rec@2mm,Rec@5mm,Rec@10mm,'
-                'F@2mm,F@5mm,F@10mm\n')
-        for r in all_clip_results:
-            for m in r['all_metrics']['Full']:
-                f.write(f"{r['clip_idx']},{m['frame']},{m['global_frame']},Full,"
-                        f"{m['edge_pct_mean']:.6f},{m['edge_pct_std']:.6f},{m['edge_pct_max']:.6f},"
-                        f"{m['edge_rmse_mm']:.6f},{m['pos_rmse_mm']:.6f},"
-                        f"{m['cd']:.4f},{m['cd_pred2ref']:.4f},{m['cd_ref2pred']:.4f},"
-                        f"{m['precision_2mm']:.4f},{m['precision_5mm']:.4f},{m['precision_10mm']:.4f},"
-                        f"{m['recall_2mm']:.4f},{m['recall_5mm']:.4f},{m['recall_10mm']:.4f},"
-                        f"{m['f_2mm']:.4f},{m['f_5mm']:.4f},{m['f_10mm']:.4f}\n")
-    print(f'\nStacked metrics: {stacked_csv}')
-    print(f'Per-clip outputs (tracking_full.mp4, 3d_keypoints.npz, smoothed_3d_keypoints.npz, '
-          f'per_frame.csv, summary.txt, plots): {output_dir}/clip_*/')
+    # keep: 3d_keypoints.npz, smoothed_3d_keypoints.npz, summary.txt (user spec).
+    # The video is NOT the harness one -- render_tracking.py (env hamer) creates
+    # tracking_deform_with_hands.mp4 as the pipeline's final step.
+    for r in all_clip_results:
+        clip_dir = output_dir / f"clip_{r['clip_idx']}"
+        full = clip_dir / 'tracking_full.mp4'
+        if full.exists():
+            full.unlink()
+    print(f'\nPer-clip outputs (3d_keypoints.npz, smoothed_3d_keypoints.npz, '
+          f'summary.txt): {output_dir}/clip_*/  -- video: run render_tracking.py')
 
 
 if __name__ == '__main__':

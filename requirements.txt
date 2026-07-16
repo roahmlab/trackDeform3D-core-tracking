@@ -6,3 +6,4 @@ scikit-image
 matplotlib
 plotly
 tqdm
+viser

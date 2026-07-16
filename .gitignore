@@ -3,4 +3,4 @@ __pycache__/
 input_data/
 output/
 deform_with_hands/output/
-output_pre_reorg/
+deform_with_hands/thirdparty/

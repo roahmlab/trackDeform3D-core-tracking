@@ -5,7 +5,7 @@ Auto-plays through the clip:
     full resolution) and /bg (rest of the scene, voxel-downsampled) -- hide or
     show either from the viser scene tree
   - MANO hand meshes (blue=left, pink=right)
-  - TRACKED KEYPOINTS from output/tracking_well/clip_0/smoothed_3d_keypoints.npz,
+  - TRACKED KEYPOINTS from output/tracking/clip_0/smoothed_3d_keypoints.npz,
     coloured pink -> blue ALONG THE ROPE from the right hand to the left hand
     (pink at the right-hand grasp, blue at the left-hand grasp; danglers inherit
     their branch colour), connected by their skeleton edges, each keypoint
@@ -22,16 +22,19 @@ import numpy as np
 import viser
 
 DIR = os.path.dirname(os.path.abspath(__file__))
-UNDIST_NPZ = '/home/yehengz/hamer/deform_with_hands/data/rgbd_undist.npz'
-HANDS_NPZ = '/home/yehengz/hamer/deform_with_hands/output/hands.npz'
-ROPE_NPZ = f'{DIR}/output/rope_masks/masks.npz'
-TRACKING_NPZ = f'{DIR}/output/tracking_well/clip_0/smoothed_3d_keypoints.npz'
+from paths import UNDIST_NPZ as _U
+UNDIST_NPZ = str(_U)
+from paths import HANDS_NPZ as _H
+HANDS_NPZ = str(_H)
+from paths import ROPE_MASKS_NPZ as _RM
+ROPE_NPZ = str(_RM)
+TRACKING_NPZ = f'{DIR}/output/tracking/clip_0/smoothed_3d_keypoints.npz'
 
 MESH_COLOR = [(70, 130, 235), (235, 120, 190)]  # RGB: blue=left, pink=right
 PINK = np.array([235.0, 120.0, 190.0])
 BLUE = np.array([70.0, 130.0, 235.0])
 TRAIL = 15           # keypoint trajectory tail (frames)
-VOXEL = 0.02         # m; background point-cloud voxel size
+VOXEL = 0.03         # m; background point-cloud voxel size
 Z_MAX = 2.6          # m; drop the far background
 HIDDEN_SEG = np.zeros((1, 2, 3), np.float32)  # degenerate segment = invisible
 
@@ -158,10 +161,14 @@ def main():
             if i - j0 >= 1:
                 traj = kp[j0:i + 1, k]
                 segs = np.stack([traj[:-1], traj[1:]], axis=1)
+                n = len(segs)
+                w = 0.7 * (np.arange(n)[::-1] / max(TRAIL, 1))[:, None]  # oldest -> 70% white
+                cols = ((1 - w) * KP_COLOR[k] + w * 255.0).astype(int)
             else:
                 segs = HIDDEN_SEG
+                cols = np.array([[255, 255, 255]])
             server.scene.add_line_segments(f'/trail/{k:02d}', segs,
-                                           colors=tuple((KP_COLOR[k] * 0.55).astype(int)),
+                                           colors=cols[:, None, :].repeat(2, 1),
                                            line_width=3.0)
 
     @sld.on_update

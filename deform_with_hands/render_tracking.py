@@ -5,14 +5,15 @@
   - keypoints coloured pink -> blue ALONG THE ROPE (right hand -> left hand,
     danglers inherit their branch colour), connected by their skeleton edges
   - anchor nodes (the two EE leaves + the two branch nodes) drawn +2 px bigger
-  - 15-frame trajectory tail per keypoint (dimmed keypoint colour)
+  - 15-frame trajectory tail per keypoint, blending toward white with age
+    (capped at 70% white so the node colour stays visible)
   - background rendered as shadow (dimmed); rope-mask foreground kept as-is
 
 Needs the HaMeR renderer -> run with the hamer env:
   /home/yehengz/miniconda3/envs/hamer/bin/python render_raw_tracking.py \
       [path/to/smoothed_3d_keypoints.npz]
 Default npz: output/tracking/clip_0/smoothed_3d_keypoints.npz
-Writes tracking_render.mp4 next to the npz.
+Writes tracking_deform_with_hands.mp4 next to the npz.
 """
 import os
 import sys
@@ -21,8 +22,10 @@ from pathlib import Path
 
 os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
 DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, '/home/yehengz/hamer')
-os.chdir('/home/yehengz/hamer')  # hamer resolves ./_DATA relative to cwd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from paths import HAMER_ROOT
+sys.path.insert(0, str(HAMER_ROOT))
+os.chdir(str(HAMER_ROOT))  # hamer resolves ./_DATA relative to cwd
 
 import cv2
 import numpy as np
@@ -31,9 +34,12 @@ from hamer.configs import get_config
 from hamer.models import DEFAULT_CHECKPOINT
 from hamer.utils.renderer import Renderer
 
-UNDIST_NPZ = '/home/yehengz/hamer/deform_with_hands/data/rgbd_undist.npz'
-HANDS_NPZ = '/home/yehengz/hamer/deform_with_hands/output/hands.npz'
-ROPE_NPZ = f'{DIR}/output/rope_masks/masks.npz'
+from paths import UNDIST_NPZ as _U
+UNDIST_NPZ = str(_U)
+from paths import HANDS_NPZ as _H
+HANDS_NPZ = str(_H)
+from paths import ROPE_MASKS_NPZ as _RM
+ROPE_NPZ = str(_RM)
 DEFAULT_TRACKING = f'{DIR}/output/tracking/clip_0/smoothed_3d_keypoints.npz'
 
 HAND_COLOR = [(0.44, 0.61, 0.86), (0.90, 0.55, 0.72)]  # RGB 0-1: blue=left, pink=right
@@ -44,6 +50,7 @@ KP_R = 5          # px; keypoint radius
 ANCHOR_R = KP_R + 2  # px; EE leaves + branch nodes (the anchors)
 EDGE_W = 3        # px
 TRAIL_W = 2       # px
+TRAIL_WHITE = 0.7  # oldest tail segment = this much white blended into the node colour
 SHADOW = 0.35     # background dim factor
 FPS = 29.98698
 
@@ -109,7 +116,6 @@ def main():
     t = rope_gradient_t(kp[0], edges, start, end)
     kp_rgb = (1 - t[:, None]) * PINK + t[:, None] * BLUE
     KP_BGR = kp_rgb[:, ::-1].astype(int)            # cv2 colours
-    TRAIL_BGR = (kp_rgb * 0.55)[:, ::-1].astype(int)
     EDGE_BGR = (0.5 * (kp_rgb[edges[:, 0]] + kp_rgb[edges[:, 1]]))[:, ::-1].astype(int)
     anchors = {0, 1, 2, 3}  # B0, B1 + the two EE leaves
 
@@ -120,7 +126,7 @@ def main():
                      update_cachedir=True)
     renderer = Renderer(cfg, faces=h['faces'])
 
-    out_path = npz_path.parent / 'tracking_render.mp4'
+    out_path = npz_path.parent / 'tracking_deform_with_hands.mp4'
     vw = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*'mp4v'), FPS, (W, H))
     for i in range(T):
         # background as shadow, rope-mask foreground untouched
@@ -140,15 +146,16 @@ def main():
             rgb = rgb * (1 - a) + rgba[:, :, :3] * a
         img = np.ascontiguousarray((rgb[:, :, ::-1] * 255).astype(np.uint8))
 
-        # 15-frame trajectory tails (dimmed keypoint colour)
+        # 15-frame trajectory tails, fading toward white with age
         j0 = max(0, i - TRAIL)
         for k in range(K_n):
-            col = tuple(int(c) for c in TRAIL_BGR[k])
             for j in range(j0, i):
                 p1, p2 = uv[j, k], uv[j + 1, k]
                 if np.isfinite(p1).all() and np.isfinite(p2).all():
+                    w = TRAIL_WHITE * (i - 1 - j) / max(TRAIL, 1)  # newest -> oldest
+                    col_rgb = (1 - w) * kp_rgb[k] + w * 255.0
                     cv2.line(img, tuple(p1.astype(int)), tuple(p2.astype(int)),
-                             col, TRAIL_W, cv2.LINE_AA)
+                             tuple(int(c) for c in col_rgb[::-1]), TRAIL_W, cv2.LINE_AA)
 
         # skeleton edges (gradient: mean of endpoint colours)
         for e_idx, (a_, b_) in enumerate(edges):
