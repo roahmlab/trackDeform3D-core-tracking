@@ -87,6 +87,37 @@ input_data/
 
 </details>
 
+### 1.4 Tracking dataset (`datasets/`)
+
+This repository also ships the **tracking results** themselves, under [`datasets/`](datasets/) —
+1,030 clips / 152,220 frames (~85 min) of 3-D keypoint-graph trajectories across six deformable
+objects. Unlike `input_data/` above, this is checked into the repo directly; no download needed.
+
+| object | type | clips | keypoints | edges |
+|---|---|---|---|---|
+| `rope` | open DLO | 227 | 14 | 13 |
+| `wire` | open DLO | 142 | 15 | 14 |
+| `branched_rope` | BDLO | 189 | 25 | 24 |
+| `branched_wire` | BDLO | 108 | 24 | 23 |
+| `fabric` | 6×6 sheet | 156 | 36 | 60 |
+| `t-shirt` | 9×9 T-shaped sheet | 208 | 81 | 96 |
+
+Each clip directory holds `3d_keypoints.npz` (raw), `smoothed_3d_keypoints.npz`, and `summary.txt`
+(per-clip metrics):
+
+```python
+import numpy as np
+d = np.load("datasets/rope/chunk_0/clip_0/3d_keypoints.npz")
+xyz   = d["full"]                     # (frames, N_keypoints, 3), camera frame, millimetres
+edges = d["edge_connection"]          # (N_edges, 2) — note: sheets use "edge_connections"
+```
+
+Clips are **up to** 150 frames, not always exactly 150 — read `full.shape[0]`. Per-clip tracking
+videos and init visualizations are not included here (~2.5 GB); they stay with the source captures.
+
+See [`datasets/README.md`](datasets/README.md) for per-object topology (branch/leaf node indices),
+tracking-quality metrics, the full file-format notes, and viser viewer commands.
+
 ---
 
 ## 2. TrackDeform3D

@@ -1,9 +1,16 @@
-# Deformable-Object Tracking Dataset (`cleaned_output`)
+# Deformable-Object Tracking Dataset (`datasets`)
 
-3-D keypoint-graph tracking results for six deformable objects. Each clip is a 150-frame (5 s @ 30 fps)
-window and contains `3d_keypoints.npz` (raw), `smoothed_3d_keypoints.npz`, `summary.txt` (metrics),
-and a tracking video. Keypoint arrays are `full` of shape `(frames, N_keypoints, 3)` in camera-frame
-millimetres, with a fixed `edge_connection` list and per-edge `reference_lengths`.
+3-D keypoint-graph tracking results for six deformable objects. Each clip is a window of **up to**
+150 frames (5 s @ 30 fps) and contains `3d_keypoints.npz` (raw), `smoothed_3d_keypoints.npz`, and
+`summary.txt` (metrics). Keypoint arrays are `full` of shape `(frames, N_keypoints, 3)` in
+camera-frame millimetres, with a fixed edge list and per-edge `reference_lengths`.
+
+> **Not every clip is 150 frames.** `branched_rope`, `fabric` and `t-shirt` are uniformly 150, but
+> `rope` ranges 131–150, `wire` 100–150, and `branched_wire` 26–150. Always read the frame count from
+> `full.shape[0]` rather than assuming 150.
+
+> **Videos are not in this repository.** Per-clip tracking `.mp4`s, init `.html` visualizations and
+> `.png`s add ~2.5 GB and are kept alongside the source captures instead.
 
 ---
 
@@ -43,15 +50,64 @@ arms that end in leaves.
 
 ## 2. Data volume
 
-| object | clips | frames | duration (mm:ss) |
-|---|---|---|---|
-| rope | 227 | 33,872 | 18:49 |
-| wire | 142 | 21,107 | 11:44 |
-| branched_rope | 189 | 28,350 | 15:45 |
-| branched_wire | 112 | 14,779 | 08:13 |
-| fabric | 156 | 23,400 | 13:00 |
-| t-shirt | 208 | 31,200 | 17:20 |
-| **TOTAL** | **1,034** | **152,708** | **84:50** |
+| object | clips | frames | duration (mm:ss) | frames/clip |
+|---|---|---|---|---|
+| rope | 227 | 33,872 | 18:49 | 131–150 |
+| wire | 142 | 21,107 | 11:43 | 100–150 |
+| branched_rope | 189 | 28,350 | 15:45 | 150 |
+| branched_wire | 108 | 14,291 | 07:56 | 26–150 |
+| fabric | 156 | 23,400 | 13:00 | 150 |
+| t-shirt | 208 | 31,200 | 17:20 | 150 |
+| **TOTAL** | **1,030** | **152,220** | **84:34** |  |
+
+### File format
+
+Every `3d_keypoints.npz` / `smoothed_3d_keypoints.npz` holds:
+
+| key | shape | notes |
+|---|---|---|
+| `full` | `(frames, N_keypoints, 3)` | camera-frame millimetres |
+| `edge_connection` *or* `edge_connections` | `(N_edges, 2)` | **name differs by object — see below** |
+| `reference_lengths` | `(N_edges,)` | frozen initial edge lengths |
+| `full_world` | `(frames, N_keypoints, 3)` | **only** in `rope` and `wire` |
+
+Two inconsistencies to code around:
+
+- **Edge-list key name.** The chain/branched objects (`rope`, `wire`, `branched_rope`,
+  `branched_wire`) use the **singular** `edge_connection`; the sheet objects (`fabric`, `t-shirt`)
+  use the **plural** `edge_connections`.
+- **`full_world`** (world-frame coordinates) is present only for `rope` and `wire`. The other four
+  objects provide camera-frame `full` only.
+- **`t-shirt` contains NaNs by design.** The garment is a T-shape stored inside a full 9×9 grid, so
+  the 24 off-shape cells (the two "armpit" blocks) are `NaN` in every frame of all 208 clips — 57 of
+  the 81 nodes are real. This is structural padding, not tracking failure, and the NaN node set is
+  identical everywhere:
+
+  ```
+  node indices that are always NaN:
+  27 28 34 35 36 37 43 44 45 46 52 53 54 55 61 62 63 64 70 71 72 73 79 80
+
+  9x9 occupancy   (X = tracked, . = NaN)
+      X X X X X X X X X
+      X X X X X X X X X
+      X X X X X X X X X
+      . . X X X X X . .
+      . . X X X X X . .
+      . . X X X X X . .
+      . . X X X X X . .
+      . . X X X X X . .
+      . . X X X X X . .
+  ```
+
+  Mask them before computing anything: `live = np.isfinite(xyz).all(axis=(0, 2))`. The other five
+  objects are NaN-free.
+
+```python
+import numpy as np
+d = np.load("datasets/rope/chunk_0/clip_0/3d_keypoints.npz")
+xyz   = d["full"]                     # (frames, N, 3) in mm
+edges = d["edge_connection" if "edge_connection" in d.files else "edge_connections"]
+```
 
 ---
 
@@ -101,7 +157,7 @@ Each object has a viser viewer under `viser/`. Run from the repo root
 
 ```
 env -u PYTHONPATH -u PYTHONHOME ~/.venvs/trackdeform/bin/python viser/<obj>_viser.py \
-    --root <cleaned_output subdir> --data-root <source captures> \
+    --root <datasets subdir> --data-root <source captures> \
     --chunk <N> --clip <M> --clip-seconds 5 --port <P>
 ```
 
@@ -115,42 +171,42 @@ specific clip). Then open the printed `http://localhost:<port>` in a browser.
 # ROPE  (root has chunk_*/clip_* directly)            port 8081
 cd /home/roahmlab/move_some_robots/crisp_env/crisp_py/trackDeform3D-core-tracking && \
 env -u PYTHONPATH -u PYTHONHOME ~/.venvs/trackdeform/bin/python viser/rope_viser.py \
-  --root cleaned_output/rope \
+  --root datasets/rope \
   --data-root /media/roahmlab/data/dlo1_first400 \
   --clip-seconds 5 --port 8081
 
 # WIRE  (subfolders: 2sec | 4sec)                     port 8082
 cd /home/roahmlab/move_some_robots/crisp_env/crisp_py/trackDeform3D-core-tracking && \
 env -u PYTHONPATH -u PYTHONHOME ~/.venvs/trackdeform/bin/python viser/wire_viser.py \
-  --root cleaned_output/wire/4sec \
+  --root datasets/wire/4sec \
   --data-root /media/roahmlab/data/captured_data_double_arm/dlo_blue_4sec \
   --clip-seconds 5 --port 8082
 
 # BRANCHED_ROPE  (subfolders: 2sec | 4sec | bdlo_contact)   port 8083
 cd /home/roahmlab/move_some_robots/crisp_env/crisp_py/trackDeform3D-core-tracking && \
 env -u PYTHONPATH -u PYTHONHOME ~/.venvs/trackdeform/bin/python viser/branch_rope_viser.py \
-  --root cleaned_output/branched_rope/4sec \
+  --root datasets/branched_rope/4sec \
   --data-root /media/roahmlab/data/captured_data_double_arm/bdlo_no_contact_4sec \
   --clip-seconds 5 --port 8083
 
 # BRANCHED_WIRE (yellow)  (subfolders: 2sec | 4sec)   port 8086
 cd /home/roahmlab/move_some_robots/crisp_env/crisp_py/trackDeform3D-core-tracking && \
 env -u PYTHONPATH -u PYTHONHOME ~/.venvs/trackdeform/bin/python viser/branched_wire_viser.py \
-  --root cleaned_output/branched_wire/4sec \
+  --root datasets/branched_wire/4sec \
   --data-root /media/roahmlab/data/captured_data_double_arm/bdlo_yellow_4sec \
   --clip-seconds 5 --port 8086
 
 # FABRIC  (subfolders = the 7 cloth datasets)         port 8084
 cd /home/roahmlab/move_some_robots/crisp_env/crisp_py/trackDeform3D-core-tracking && \
 env -u PYTHONPATH -u PYTHONHOME ~/.venvs/trackdeform/bin/python viser/fabric_viser.py \
-  --root cleaned_output/fabric/cloth_no_occlusion_front_4sec \
+  --root datasets/fabric/cloth_no_occlusion_front_4sec \
   --data-root /media/roahmlab/data/captured_data_double_arm/cloth_no_occlusion_front_4sec \
   --clip-seconds 5 --port 8084
 
 # T-SHIRT  (subfolders: test_0302_tshirt_25 | test_0302_tshirt_4sec | t_shirt_3sec | t_shirt_4sec)   port 8085
 cd /home/roahmlab/move_some_robots/crisp_env/crisp_py/trackDeform3D-core-tracking && \
 env -u PYTHONPATH -u PYTHONHOME ~/.venvs/trackdeform/bin/python viser/t_shirt_viser.py \
-  --root cleaned_output/t-shirt/t_shirt_4sec \
+  --root datasets/t-shirt/t_shirt_4sec \
   --data-root /media/roahmlab/data/captured_data_double_arm/t_shirt_4sec \
   --clip-seconds 5 --port 8085
 ```
@@ -163,7 +219,7 @@ env -u PYTHONPATH -u PYTHONHOME ~/.venvs/trackdeform/bin/python viser/t_shirt_vi
   use the in-browser dropdowns.
 - For a **2sec** wire/branched dataset, point both `--root …/2sec` and `--data-root …_2sec`
   (e.g. `dlo_blue_2sec`, `bdlo_no_contact_2sec`, `bdlo_yellow_2sec`).
-- For any **fabric**/**t-shirt** dataset, set `--root cleaned_output/<obj>/<dataset>` and
+- For any **fabric**/**t-shirt** dataset, set `--root datasets/<obj>/<dataset>` and
   `--data-root /media/roahmlab/data/captured_data_double_arm/<dataset>` (same dataset name).
 - `branch_rope_viser` and `branched_wire_viser` both default to port **8083**, so branched_wire uses
   **8086** above; change any `--port` if it's already in use.
