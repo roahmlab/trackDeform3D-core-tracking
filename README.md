@@ -107,10 +107,14 @@ Each clip directory holds `3d_keypoints.npz` (raw), `smoothed_3d_keypoints.npz`,
 
 ```python
 import numpy as np
-d = np.load("datasets/rope/chunk_0/clip_0/3d_keypoints.npz")
-xyz   = d["full"]                     # (frames, N_keypoints, 3), camera frame, millimetres
+d = np.load("datasets/rope/chunk_0/clip_0/smoothed_3d_keypoints.npz")
+xyz   = d["full_upright"]             # (frames, N_keypoints, 3) in mm, gravity-aligned (+z up)
 edges = d["edge_connection"]          # (N_edges, 2) — note: sheets use "edge_connections"
 ```
+
+Prefer `smoothed_3d_keypoints.npz` over `3d_keypoints.npz` — the raw file is unfiltered and visibly
+jittery. Use `full_upright` over `full`: `full` is in the camera frame, where **+y points down and
++z is depth**, so plotting `full` with z as the vertical axis stands the scene on end.
 
 Clips are **up to** 150 frames, not always exactly 150 — read `full.shape[0]`. Per-clip tracking
 videos and init visualizations are not included here (~2.5 GB); they stay with the source captures.

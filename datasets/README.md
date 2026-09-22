@@ -3,7 +3,13 @@
 3-D keypoint-graph tracking results for six deformable objects. Each clip is a window of **up to**
 150 frames (5 s @ 30 fps) and contains `3d_keypoints.npz` (raw), `smoothed_3d_keypoints.npz`, and
 `summary.txt` (metrics). Keypoint arrays are `full` of shape `(frames, N_keypoints, 3)` in
-camera-frame millimetres, with a fixed edge list and per-edge `reference_lengths`.
+camera-frame millimetres, with a fixed edge list and per-edge `reference_lengths`. The smoothed files
+also carry **`full_upright`**, the same trajectory in a gravity-aligned frame — see
+[Coordinate frames](#coordinate-frames).
+
+> **Use `smoothed_3d_keypoints.npz` unless you specifically want the unfiltered signal.** The raw
+> `3d_keypoints.npz` is noticeably jittery: on `rope/chunk_0/clip_0` the mean frame-to-frame
+> acceleration is 1.278 mm/f² raw versus 0.061 smoothed, a 21x reduction.
 
 > **Not every clip is 150 frames.** `branched_rope`, `fabric` and `t-shirt` are uniformly 150, but
 > `rope` ranges 131–150, `wire` 100–150, and `branched_wire` 26–150. Always read the frame count from
@@ -67,6 +73,7 @@ Every `3d_keypoints.npz` / `smoothed_3d_keypoints.npz` holds:
 | key | shape | notes |
 |---|---|---|
 | `full` | `(frames, N_keypoints, 3)` | camera-frame millimetres |
+| `full_upright` | `(frames, N_keypoints, 3)` | gravity-aligned; **smoothed files only** |
 | `edge_connection` *or* `edge_connections` | `(N_edges, 2)` | **name differs by object — see below** |
 | `reference_lengths` | `(N_edges,)` | frozen initial edge lengths |
 | `full_world` | `(frames, N_keypoints, 3)` | **only** in `rope` and `wire` |
@@ -108,6 +115,62 @@ d = np.load("datasets/rope/chunk_0/clip_0/3d_keypoints.npz")
 xyz   = d["full"]                     # (frames, N, 3) in mm
 edges = d["edge_connection" if "edge_connection" in d.files else "edge_connections"]
 ```
+
+---
+
+### Coordinate frames
+
+`full` is in the **camera frame, OpenCV convention**:
+
+| axis | direction | typical range here |
+|---|---|---|
+| `+x` | right | ±400 mm |
+| `+y` | **down** (toward the floor) | ±400 mm |
+| `+z` | **forward — depth from the camera** | ~800–1600 mm |
+
+**`+z` is depth, not height.** Plotting `z` on a vertical axis makes the scene look like it is
+standing on end; a hanging t-shirt appears to lie flat. Gravity points along **`+y`**.
+
+Every `smoothed_3d_keypoints.npz` ships this already as **`full_upright`**, in `(right, depth, up)`
+order — use it directly:
+
+```python
+d = np.load("datasets/rope/chunk_0/clip_0/smoothed_3d_keypoints.npz")
+xyz = d["full_upright"]      # gravity-aligned: +z is up
+```
+
+For the raw `3d_keypoints.npz` files, which do not carry it, reorder yourself:
+
+```python
+upright = np.stack([xyz[..., 0], xyz[..., 2], -xyz[..., 1]], axis=-1)
+```
+
+This is exact — a pure axis permutation, no calibration needed. It is valid for **all six objects**:
+the direction that maps to world up was computed from each rig's `T_cam2right` extrinsics, and every
+camera is mounted level to within 1.25°.
+
+| object | world-up in camera coords | tilt off `-y` |
+|---|---|---|
+| rope | `( 0.0017, -1.0000, -0.0010)` | 0.11° |
+| wire | `(-0.0069, -1.0000,  0.0060)` | 0.52° |
+| branched_rope | `(-0.0038, -1.0000, -0.0006)` | 0.22° |
+| branched_wire | `(-0.0005, -1.0000, -0.0036)` | 0.21° |
+| fabric | `( 0.0108, -0.9999, -0.0015)` | 0.62° |
+| t-shirt | `(-0.0082, -1.0000,  0.0011)` | 0.47° |
+
+#### World frame (`full_world`, rope and wire only)
+
+`full_world` is the **right robot base frame** (`+z` up). It is reproduced exactly from `full` by the
+rig extrinsics, translation in metres scaled to millimetres:
+
+```python
+T = np.load("transform_ee_cam_world.npz")["T_cam2right"]
+world = full @ T[:3, :3].T + T[:3, 3] * 1000.0     # verified: 0.000 mm residual
+```
+
+Calibration is per capture session, not per object — `wire/4sec/chunk_{0,1,2}` use a second rig pose
+(`..._poseB_chunks0-2.npz`) and are off by ~31 mm under the default one. The other 52 wire chunks and
+all 19 rope chunks match the default calibration to 0.000 mm.
 
 ---
 
